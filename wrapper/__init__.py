@@ -19,33 +19,37 @@ database = cosmos_client.get_database_client(config["DATABASE_NAME"])
 container = database.get_container_client(config["CONTAINER_NAME"])
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_files(files: list[UploadFile] = File(...)):
     try:
-        blob_name = file.filename
-        blob_client = blob_service_client.get_blob_client(container="uploads", blob=blob_name)
-        blob_client.upload_blob(file.file)
-     
-        sas_token = generate_blob_sas(blob_service_client.account_name,
-                                      "uploads", blob_name,
-                                      account_key=blob_service_client.credential.account_key,
-                                      permission=BlobSasPermissions(read=True),
-                                      expiry=datetime.utcnow() + timedelta(hours=24))
+        responses = []
+        for file in files:
+            blob_name = file.filename
+            blob_client = blob_service_client.get_blob_client(container="uploads", blob=blob_name)
+            blob_client.upload_blob(file.file)
+         
+            sas_token = generate_blob_sas(blob_service_client.account_name,
+                                          "uploads", blob_name,
+                                          account_key=blob_service_client.credential.account_key,
+                                          permission=BlobSasPermissions(read=True),
+                                          expiry=datetime.utcnow() + timedelta(hours=24))
+            
+            download_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/uploads/{blob_name}?{sas_token}"
+            
+            metadata = {
+                "id": blob_name,
+                "url": download_url,
+                "limit": 100,
+                "downloaded": 0,
+                "expiry": (datetime.utcnow() + timedelta(hours=24)).isoformat()
+            }
+            container.create_item(metadata)
+            
+            responses.append({
+                "filename": blob_name,
+                "download_url": download_url,
+            })
         
-        download_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/uploads/{blob_name}?{sas_token}"
-        
-        metadata = {
-            "id": blob_name,
-            "url": download_url,
-            "limit": 100,
-            "downloaded": 0,
-            "expiry": (datetime.utcnow() + timedelta(hours=24)).isoformat()
-        }
-        container.create_item(metadata)
-        
-        return {
-            "download_url": download_url,
-            # "qr_code": generate_qr_code(download_url)
-        }
+        return responses
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
