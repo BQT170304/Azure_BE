@@ -5,18 +5,18 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from azure.cosmos import CosmosClient
 from datetime import datetime, timedelta
 import qrcode
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 import azure.functions as func
 
-load_dotenv()
+config = dotenv_values(".env")
 
 app = FastAPI()
 
 # Initialize Azure Blob Storage and Cosmos DB clients
-blob_service_client = BlobServiceClient.from_connection_string(os.getenv("BLOB_CONNECTION_STRING"))
-cosmos_client = CosmosClient(os.getenv("COSMOS_DB_ENDPOINT"), os.getenv("COSMOS_DB_KEY"))
-database = cosmos_client.get_database_client("chillfile_db")
-container = database.get_container_client("files")
+blob_service_client = BlobServiceClient.from_connection_string(config["AZURE_STORAGE_CONNECTION_STRING"])
+cosmos_client = CosmosClient(config["COSMOS_DB_ENDPOINT"], config["COSMOS_DB_KEY"])
+database = cosmos_client.get_database_client(config["DATABASE_NAME"])
+container = database.get_container_client(config["CONTAINER_NAME"])
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -43,25 +43,25 @@ async def upload_file(file: UploadFile = File(...)):
         container.create_item(metadata)
         
         return {
-            "url": download_url,
-            "qr_code": generate_qr_code(download_url)
+            "download_url": download_url,
+            # "qr_code": generate_qr_code(download_url)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def generate_qr_code(url: str):
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4
-    )
-    qr.add_data(url)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    qr_code_file = f"/tmp/{url.split('/')[-1]}.png"
-    img.save(qr_code_file)
-    return qr_code_file
+# def generate_qr_code(url: str):
+#     qr = qrcode.QRCode(
+#         version=1,
+#         error_correction=qrcode.constants.ERROR_CORRECT_L,
+#         box_size=10,
+#         border=4
+#     )
+#     qr.add_data(url)
+#     qr.make(fit=True)
+#     img = qr.make_image(fill_color="black", back_color="white")
+#     qr_code_file = f"/tmp/{url.split('/')[-1]}.png"
+#     img.save(qr_code_file)
+#     return qr_code_file
 
 @app.get("/download/{file_id}")
 async def download_file(file_id: str):
