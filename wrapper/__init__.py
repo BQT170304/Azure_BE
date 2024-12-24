@@ -1,12 +1,12 @@
 import os
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.cosmos import CosmosClient
 from datetime import datetime, timedelta
 import qrcode
 from dotenv import dotenv_values
 import azure.functions as func
+import uuid
 
 config = dotenv_values(".env")
 
@@ -16,69 +16,84 @@ app = FastAPI()
 blob_service_client = BlobServiceClient.from_connection_string(config["AZURE_STORAGE_CONNECTION_STRING"])
 cosmos_client = CosmosClient(config["COSMOS_DB_ENDPOINT"], config["COSMOS_DB_KEY"])
 database = cosmos_client.get_database_client(config["DATABASE_NAME"])
-container = database.get_container_client(config["CONTAINER_NAME"])
+files_container = database.get_container_client(config["FILES_CONTAINER_NAME"])
+links_container = database.get_container_client(config["LINKS_CONTAINER_NAME"])
 
 @app.post("/upload")
-async def upload_files(files: list[UploadFile] = File(...)):
+async def upload_files(files: list[UploadFile] = File(...), limit: int = Form(...)):
     try:
-        responses = []
+        link_id = str(uuid.uuid4())
+        file_metadata_list = []
+
         for file in files:
+            file_id = str(uuid.uuid4())
             blob_name = file.filename
             blob_client = blob_service_client.get_blob_client(container="uploads", blob=blob_name)
             blob_client.upload_blob(file.file)
-         
+
             sas_token = generate_blob_sas(blob_service_client.account_name,
                                           "uploads", blob_name,
                                           account_key=blob_service_client.credential.account_key,
                                           permission=BlobSasPermissions(read=True),
                                           expiry=datetime.utcnow() + timedelta(hours=24))
-            
+
             download_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/uploads/{blob_name}?{sas_token}"
-            
-            metadata = {
-                "id": blob_name,
+
+            file_metadata = {
+                "id": file_id,
                 "url": download_url,
-                "limit": 100,
                 "downloaded": 0,
-                "expiry": (datetime.utcnow() + timedelta(hours=24)).isoformat()
+                "limit": limit,
             }
-            container.create_item(metadata)
-            
-            responses.append({
-                "filename": blob_name,
-                "download_url": download_url,
-            })
-        
-        return responses
+            files_container.create_item(file_metadata)
+            file_metadata.pop("limit")
+            file_metadata_list.append(file_metadata)
+
+        link_metadata = {
+            "id": link_id,
+            "files": file_metadata_list,
+            "limit": limit
+        }
+        links_container.create_item(link_metadata)
+
+        return {"id": link_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# def generate_qr_code(url: str):
-#     qr = qrcode.QRCode(
-#         version=1,
-#         error_correction=qrcode.constants.ERROR_CORRECT_L,
-#         box_size=10,
-#         border=4
-#     )
-#     qr.add_data(url)
-#     qr.make(fit=True)
-#     img = qr.make_image(fill_color="black", back_color="white")
-#     qr_code_file = f"/tmp/{url.split('/')[-1]}.png"
-#     img.save(qr_code_file)
-#     return qr_code_file
-
-@app.get("/download/{file_id}")
-async def download_file(file_id: str):
+@app.get("/link/{id}")
+async def get_link(id: str):
     try:
-        item = container.read_item(item=file_id, partition_key=file_id)
-        if item["downloaded"] >= item["limit"] or datetime.fromisoformat(item["expiry"]) < datetime.utcnow():
-            raise HTTPException(status_code=403, detail="Download limit reached or file expired")
-
-        item["downloaded"] += 1
-        container.replace_item(item=file_id, body=item)
-        return JSONResponse(content={"url": item["url"], "remaining_downloads": item["limit"] - item["downloaded"]})
+        link = links_container.read_item(item=id, partition_key=id)
+        return {
+            "files": link["files"],
+            "limit": link["limit"]
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail="Link not found")
+
+@app.get("/download/{link_id}/{file_id}")
+async def download_file(link_id: str, file_id: str):
+    try:
+        file_item = files_container.read_item(item=file_id, partition_key=file_id)
+        if file_item["downloaded"] >= file_item["limit"]:
+            raise HTTPException(status_code=403, detail="Download limit reached")
+
+        file_item["downloaded"] += 1
+        files_container.replace_item(item=file_id, body=file_item)
+        
+        # Update file download count in links_container
+        link_item = links_container.read_item(item=link_id, partition_key=link_id)
+        for file in link_item["files"]:
+            if file["id"] == file_id:
+                file["downloaded"] += 1
+                break
+        links_container.replace_item(item=link_id, body=link_item)
+        
+        return {
+            "url": file_item["url"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=e)
 
 @app.get("/")
 async def read_root():
