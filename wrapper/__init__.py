@@ -29,7 +29,7 @@ async def upload_files(files: list[UploadFile] = File(...), limit: int = Form(..
             file_id = str(uuid.uuid4())
             blob_name = file.filename
             blob_client = blob_service_client.get_blob_client(container="uploads", blob=blob_name)
-            blob_client.upload_blob(file.file)
+            blob_client.upload_blob(file.file, overwrite=True)
 
             sas_token = generate_blob_sas(blob_service_client.account_name,
                                           "uploads", blob_name,
